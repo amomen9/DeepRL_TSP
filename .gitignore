@@ -10,7 +10,7 @@
 *.userosscache
 *.sln.docstates
 *.env
-
+.claude/
 Notes.ipynb
 
 project_info__*
