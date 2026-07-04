@@ -1,0 +1,2 @@
+Algorithm,Setting,Mean (all),Std (all),Mean (last 10%),Std (last 10%),N (all),N (last)
+PPO,"PPO, γ:0.99, A-α:3e-4, A-NN:[128,128], Full-Ep:✗, $λ_{GAE}$:0.96",-922.355391,223.486594,-804.097175,140.178688,12000,1200

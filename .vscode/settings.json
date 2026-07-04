@@ -1,0 +1,10 @@
+
+{
+  "python.defaultInterpreterPath": "python.exe",
+  "code-runner.runInTerminal": true,
+  "code-runner.respectShebang": false,
+  "code-runner.executorMap": {
+    "python": "clear; & \"python.exe\" -u"
+},
+"python-envs.defaultEnvManager": "ms-python.python:system"
+}

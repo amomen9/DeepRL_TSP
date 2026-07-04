@@ -1,0 +1,26 @@
+{
+  "actor_hidden_nn": [
+    128,
+    128
+  ],
+  "actor_lr": 0.0003000000142492354,
+  "algo_type": "PPO",
+  "clip_epsilon": 0.10000000149011612,
+  "component": "Critic",
+  "critic_hidden_nn": [
+    512,
+    512
+  ],
+  "critic_lr": 0.009999999776482582,
+  "entropy_coef": 0.009999999776482582,
+  "eval_interval": 250,
+  "gae_lambda": 0.9599999785423279,
+  "gamma": 0.9900000095367432,
+  "max_episode_length": 13,
+  "n_actions": 11,
+  "n_epochs": 30,
+  "n_timesteps": 500000,
+  "rollout_steps": 512,
+  "use_saved_disk_networks_checkpoints": false,
+  "value_coef": 0.5
+}

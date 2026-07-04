@@ -1,0 +1,6 @@
+[submodule "TSP-DRL_Bello"]
+	path = TSP-DRL_Bello
+	url = https://github.com/amomen9/TSP-DRL_Bello.git
+[submodule "TSP-DRL-Test"]
+	path = TSP-DRL-Test
+	url = https://github.com/amomen9/TSP-DRL-Test.git

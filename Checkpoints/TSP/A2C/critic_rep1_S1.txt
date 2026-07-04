@@ -1,0 +1,21 @@
+{
+  "TN_step": 10,
+  "actor_hidden_nn": [
+    64,
+    64
+  ],
+  "actor_lr": 0.0003499999875202775,
+  "algo_type": "A2C",
+  "component": "Critic",
+  "critic_hidden_nn": [
+    128,
+    128
+  ],
+  "critic_lr": 0.009999999776482582,
+  "eval_interval": 250,
+  "gamma": 0.9990000128746033,
+  "max_episode_length": 13,
+  "n_actions": 11,
+  "n_timesteps": 2000000,
+  "use_saved_disk_networks_checkpoints": true
+}
