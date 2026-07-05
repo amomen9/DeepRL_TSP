@@ -202,11 +202,12 @@ def run_selected_experiments(
 
     baseline_model = gc.get("baseline_model", None)
     baseline_algo_upper = str(baseline_model).upper() if baseline_model else None
-    # "BELLO" is a dedicated Pointer-Network baseline handled separately below
-    # (it is not a policy-gradient algorithm, so it must not enter the A2C/SAC/PPO
-    # job-building / parallel-run path). Other baselines are run as a normal
-    # experiment whose curve is then reused as the benchmark.
-    if baseline_algo_upper is not None and baseline_algo_upper != "BELLO":
+    # Ensure the selected baseline is among the experiments so its curve is
+    # produced and can be promoted to the benchmark. A2C/SAC/PPO run through the
+    # policy-gradient job path; TSP_TEST and BELLO are dedicated-runner methods
+    # that skip that path (handled by their own prepare/finalize below) but are
+    # still listed as experiments.
+    if baseline_algo_upper is not None:
         already_listed = {str(e).upper() for e in experiments}
         if baseline_algo_upper not in already_listed:
             experiments = list(experiments) + [baseline_algo_upper]
@@ -305,6 +306,11 @@ def run_selected_experiments(
             # A2C/SAC/PPO job-building / parallel-run path.
             if tsp_test_config is None:
                 raise ValueError("tsp_test_config dict is required when TSP_TEST is included.")
+            continue
+        elif algo_upper == "BELLO":
+            # Bello Pointer-Network baseline: trained on the fixed instance by a
+            # dedicated runner below (immutable hyperparameters, no config dict) -
+            # it must not enter the A2C/SAC/PPO job-building / parallel-run path.
             continue
         else:
             raise ValueError(f"Unknown algorithm: {algo}")
@@ -472,7 +478,7 @@ def run_selected_experiments(
 
     # BELLO baseline: decide how many reps still need training (disk top-up).
     bello_plan = None
-    if baseline_algo_upper == "BELLO":
+    if any(str(e).upper() == "BELLO" for e in experiments):
         from .Library_bello_baseline import prepare_bello_baseline
         bello_plan = prepare_bello_baseline(
             env=env, global_config=gc, n_timesteps=n_timesteps, eval_interval=eval_interval,
@@ -591,7 +597,8 @@ def run_selected_experiments(
         for global_idx, job in pending_settings:
             print(f"Setting {global_idx + 1}/{len(all_setting_jobs)}: {job['curve_label']}")
         if bello_n_to_train > 0:
-            print(f"Baseline: BELLO ({bello_n_to_train} new rep(s))")
+            _bello_role = "Baseline" if baseline_algo_upper == "BELLO" else "Experiment"
+            print(f"{_bello_role}: BELLO ({bello_n_to_train} new rep(s))")
         if tsp_test_n_to_train > 0:
             print(f"Experiment: TSP_TEST ({tsp_test_n_to_train} new rep(s))")
         print()
@@ -665,24 +672,28 @@ def run_selected_experiments(
 
     # ── Bello Pointer-Network baseline (finalize) ─────────────────────────────
     # BELLO trained its shortfall reps in the shared pool above; assemble the
-    # combined curve here (or reuse the fully-on-disk curve produced by prepare)
-    # and promote its mean curve to the benchmark. Disk reuse uses the same
-    # matching rules as the other algorithms, but a matching BELLO.xlsx always
-    # short-circuits retraining regardless of the global 'use_existing_disk_data'.
+    # combined curve here (or reuse the fully-on-disk curve produced by prepare).
+    # Its curve is drawn as a regular experiment curve next to A2C/SAC/PPO -
+    # unless it was selected as the baseline_model, in which case it becomes the
+    # benchmark curve instead (mirroring the TSP_TEST handling below). Disk reuse
+    # uses the same matching rules as the other algorithms, but a matching
+    # BELLO.xlsx always short-circuits retraining regardless of the global
+    # 'use_existing_disk_data'.
+    bello_result = None
+    bello_label = None
     if bello_plan is not None:
         if bello_plan["status"] == "ready":
             bello_result = bello_plan["result"]
+            bello_label = bello_plan["curve_label"]
         elif bello_plan["status"] == "train" and bello_n_to_train > 0:
             from .Library_bello_baseline import finalize_bello_baseline
             bello_new_reps = [pool_results[("BELLO", i)] for i in range(bello_n_to_train)]
-            bello_result = finalize_bello_baseline(
+            bello_result, bello_label = finalize_bello_baseline(
                 bello_plan, bello_new_reps,
                 base_seed=base_seed, data_sheets_dir=data_sheets_dir, plots_dir="plots",
                 global_config=gc, format_sheets=format_sheets,
             )
-        else:
-            bello_result = None
-        if bello_result is not None:
+        if bello_result is not None and baseline_algo_upper == "BELLO":
             lc_mean_bello, _lc_std_bello, ts_bello = bello_result[:3]
             benchmark_steps = np.asarray(ts_bello, dtype=np.int32)
             benchmark_returns_raw = np.asarray(lc_mean_bello, dtype=np.float32)
@@ -850,6 +861,23 @@ def run_selected_experiments(
             n_for_ci_fallback=n_reps_tt,
             curve_ls="solid",
             n_reps_for_agg=n_reps_tt,
+        )
+
+    # Bello curve (regular experiment curve; skipped when it was promoted to the
+    # benchmark via baseline_model == "BELLO" above).
+    if bello_result is not None and baseline_algo_upper != "BELLO":
+        lc_b, lc_std_b, ts_b = bello_result[:3]
+        raw_b = bello_result[3] if len(bello_result) >= 4 else None
+        n_reps_b = int(raw_b.shape[0]) if raw_b is not None else None
+        _emit_curves_for_setting(
+            lc_mean_fallback=lc_b,
+            lc_std_fallback=lc_std_b,
+            raw_returns=raw_b,
+            timesteps=ts_b,
+            base_label=bello_label or "Bello baseline",
+            n_for_ci_fallback=n_reps_b,
+            curve_ls="solid",
+            n_reps_for_agg=n_reps_b,
         )
 
     for pc in plot_configs:

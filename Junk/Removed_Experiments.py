@@ -14,24 +14,13 @@ and method comparison note on slide 18.
 import os
 import sys
 import copy
+import ast
 import argparse
-from typing import Any, Dict
+from typing import Any, Dict, List, Optional, TypedDict
 
 import numpy as np
 
 from Library.Library_experiment_orchestrator import run_selected_experiments
-from Library.Library_config import (
-    IncludedAlgorithms,
-    A2CConfig,
-    PPOConfig,
-    SACConfig,
-    TSPTestConfig,
-    GlobalConfig,
-    _CLI_SECTION_ALIASES,
-    _validate_config_keys,
-    _str2bool,
-    _apply_set_item,
-)
 from Environment import TSPEnvironment
 from Library.Library_env_elements import inclusion_matrix_to_uncertain_routes
 from Library.Helper_excel import load_sample_matrices
@@ -46,6 +35,209 @@ from Use_Trained_Model import evaluate_trained_model_on_matrices, fill_dp_route_
 _reconfigure = getattr(sys.stdout, "reconfigure", None)
 if _reconfigure is not None:
     _reconfigure(encoding="utf-8")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Configuration schemas
+#
+# These ``TypedDict``s document the exact set of keys each config section
+# accepts and double as the single source of truth for key-validation below.
+# They are *typing only*: annotating the dict literals with them adds editor
+# autocomplete and static type-checking but changes nothing at runtime (the
+# configs stay plain dicts, and PEP 526 local annotations are never evaluated).
+# ``total=False`` lets partial dicts (e.g. overrides) type-check too.
+# ─────────────────────────────────────────────────────────────────────────────
+class IncludedAlgorithms(TypedDict, total=False):
+    A2C: bool
+    PPO: bool
+    SAC: bool
+    TSP_TEST: bool
+
+
+class A2CConfig(TypedDict, total=False):
+    gamma: List[float]
+    actor_lr: List[float]
+    actor_hidden_nn: List[List[int]]
+    critic_lr: List[float]
+    critic_hidden_nn: List[List[int]]
+    FULL_EPISODE_UPDATES: List[bool]
+    TN_step: List[int]
+    legend_parameters: Dict[str, list]
+
+
+class PPOConfig(TypedDict, total=False):
+    gamma: List[float]
+    actor_lr: List[float]
+    actor_hidden_nn: List[List[int]]
+    critic_lr: List[float]
+    critic_hidden_nn: List[List[int]]
+    FULL_EPISODE_UPDATES: List[bool]
+    gae_lambda: List[float]
+    clip_epsilon: List[float]
+    n_epochs: List[int]
+    entropy_coef: List[float]
+    value_coef: List[float]
+    rollout_steps: List[int]
+    legend_parameters: Dict[str, list]
+
+
+class SACConfig(TypedDict, total=False):
+    gamma: List[float]
+    actor_lr: List[float]
+    actor_hidden_nn: List[List[int]]
+    critic_lr: List[float]
+    critic_hidden_nn: List[List[int]]
+    FULL_EPISODE_UPDATES: List[bool]
+    TN_step: List[int]
+    alpha: List[float]
+    alpha_lr: List[float]
+    auto_tune_alpha: List[bool]
+    target_entropy_ratio: List[float]
+    tau: List[float]
+    legend_parameters: Dict[str, list]
+
+
+class TSPTestConfig(TypedDict, total=False):
+    n_repetitions: int
+    steps: int
+    batch: int
+    pomo_size: Optional[int]
+    embed: int
+    n_heads: int
+    n_layers: int
+    ff_hidden: int
+    clip_logits: float
+    softmax_T: float
+    lr: float
+    weight_decay: float
+    grad_norm_clip: float
+    is_lr_decay: bool
+    lr_decay: float
+    lr_decay_step: int
+    curve_label: str
+
+
+class GlobalConfig(TypedDict, total=False):
+    MIN_UNUSED_CPU_CORES: int
+    n_repetitions: int
+    k_order_aggregation_methods: Dict[str, Any]
+    benchmark_curve: int
+    benchmark_name: str
+    plot_smoothing_window: List[int]
+    curve_confidence_interval: float
+    curve_shaded_area_opacity: float
+    curve_plot: bool
+    animation_plot: bool
+    TSP_Optimal_Cost: Optional[float]
+    TSP_Best_Cost: Optional[float]
+    TSP_Worst_Cost: Optional[float]
+    use_existing_disk_data: bool
+    checkpoints: Dict[str, bool]
+    match_training_matrices: bool
+    Environment: Any
+    n_timesteps: float
+    max_episode_length: int
+    base_seed: int
+    eval_interval: int
+    n_eval_episodes: int
+    baseline_model: Optional[str]
+    n_use_trained_model: int
+    action_selection_method: str
+    trained_model_reseed_seed: Optional[int]
+
+
+# Section name -> schema; the schema's annotations are the allowed keys.
+_SECTION_SCHEMAS: Dict[str, Any] = {
+    "global_config": GlobalConfig,
+    "a2c_config": A2CConfig,
+    "ppo_config": PPOConfig,
+    "sac_config": SACConfig,
+    "tsp_test_config": TSPTestConfig,
+    "included_algorithms": IncludedAlgorithms,
+}
+
+# Short aliases accepted on the command line (and in ``--set``) -> section name.
+_CLI_SECTION_ALIASES: Dict[str, str] = {
+    "global": "global_config",
+    "a2c": "a2c_config",
+    "ppo": "ppo_config",
+    "sac": "sac_config",
+    "tsp_test": "tsp_test_config",
+    "included": "included_algorithms",
+}
+
+
+def _validate_config_keys(section_name: str, values: dict) -> None:
+    """Raise if *values* holds a key the section's schema doesn't declare.
+
+    Catches typos in the in-script config, in programmatic ``overrides`` and in
+    command-line overrides up front, instead of letting them silently no-op deep
+    inside a run. Only top-level keys are checked (nested dicts are free-form).
+    """
+    schema = _SECTION_SCHEMAS.get(section_name)
+    if schema is None:
+        raise KeyError(
+            f"Unknown configuration section '{section_name}'. "
+            f"Valid sections: {sorted(_SECTION_SCHEMAS)}."
+        )
+    allowed = set(schema.__annotations__)
+    unknown = sorted(k for k in values if k not in allowed)
+    if unknown:
+        raise KeyError(
+            f"Unknown key(s) {unknown} for section '{section_name}'. "
+            f"Valid keys: {sorted(allowed)}."
+        )
+
+
+def _str2bool(value: str) -> bool:
+    """argparse helper so boolean flags accept true/false/yes/no/1/0."""
+    if isinstance(value, bool):
+        return value
+    if value.lower() in ("true", "t", "yes", "y", "1"):
+        return True
+    if value.lower() in ("false", "f", "no", "n", "0"):
+        return False
+    raise argparse.ArgumentTypeError(f"expected a boolean value, got '{value}'")
+
+
+def _apply_set_item(targets: Dict[str, Any], item: str) -> None:
+    """Apply one generic ``SECTION.KEY[.SUBKEY...]=VALUE`` CLI override in place.
+
+    Walks into the live section dict so nested overrides (e.g. a single key
+    inside ``checkpoints``) preserve their sibling keys. ``VALUE`` is parsed with
+    ``ast.literal_eval`` so numbers, bools and lists work (``[0.9,0.99]``,
+    ``[[256,256]]``); anything that won't parse is kept as a raw string.
+    """
+    if "=" not in item:
+        raise ValueError(
+            f"--set expects SECTION.KEY=VALUE (e.g. ppo.gamma=[0.9,0.99]), got '{item}'."
+        )
+    path, raw = item.split("=", 1)
+    parts = [p for p in path.strip().split(".") if p]
+    if len(parts) < 2:
+        raise ValueError(
+            f"--set path '{path}' must be SECTION.KEY (optionally nested), e.g. "
+            "global.checkpoints.use_saved_disk_networks_checkpoints=True."
+        )
+    section_name = _CLI_SECTION_ALIASES.get(parts[0])
+    if section_name is None:
+        raise KeyError(
+            f"Unknown --set section '{parts[0]}'. Valid: {sorted(_CLI_SECTION_ALIASES)}."
+        )
+    keys = parts[1:]
+    _validate_config_keys(section_name, {keys[0]: None})  # top-level key check
+    try:
+        value = ast.literal_eval(raw)
+    except (ValueError, SyntaxError):
+        value = raw  # fall back to the raw string
+    node: dict = targets[section_name]
+    for key in keys[:-1]:
+        child = node.get(key)
+        if not isinstance(child, dict):
+            child = {}
+            node[key] = child
+        node = child
+    node[keys[-1]] = value
 
 
 def Test_TSP(input=None, *, overrides=None):
@@ -168,7 +360,7 @@ def Test_TSP(input=None, *, overrides=None):
         #       on these matrices regardless of this flag. Set False to restore
         #       the legacy n_actions/architecture-only checkpoint matching.
         "checkpoints": {
-            "use_saved_disk_networks_checkpoints": False,
+            "use_saved_disk_networks_checkpoints": True,
             "skip_selection_hyperparameter_match": True,
             "match_training_matrices": True,
         },
@@ -184,10 +376,32 @@ def Test_TSP(input=None, *, overrides=None):
     }
 
     included_algorithms: IncludedAlgorithms = {
+        "A2C": False,
         "PPO": True,
+        "SAC": False,
         "TSP_TEST": True,   # TSP-DRL-Test submodule: POMO-trained Attention Model (Kool 2019 + Kwon 2020), the policy-based contender to the Bello baseline. Configured via tsp_test_config below; run by a dedicated runner (Library_tsp_test_experiment) on the same fixed instance, its curve is drawn next to A2C/PPO/SAC and the Bello benchmark.
-        "BELLO": False,          # Bello Pointer-Network baseline (Bello 2016) trained on the same fixed instance as TSP-DRL-Test; its curve is drawn next to A2C/PPO/SAC and the TSP-DRL-Test contender.
+    
     }
+
+    a2c_config: A2CConfig = {
+        "gamma": [0.999],                    # list of discount factors to sweep
+        "actor_lr": [3.5e-4],
+        "actor_hidden_nn": [[64, 64]],
+        "critic_lr": [0.01],
+        "critic_hidden_nn": [[128, 128]],
+        "FULL_EPISODE_UPDATES": [True],
+        "TN_step": [10],
+        "legend_parameters": {
+            "gamma": [r"γ:", True],
+            "actor_lr": [r"A-α:", True],
+            "critic_lr": [r"C-β:", True],
+            "actor_hidden_nn": [r"A-NN:", True],
+            "critic_hidden_nn": [r"C-NN:", False],
+            "FULL_EPISODE_UPDATES": [r"Full-Ep:", True],
+            "TN_step": [r"TN:", False],
+        },
+    }
+
 
     ppo_config: PPOConfig = {
         "gamma": [0.99],                    # list of discount factors to sweep
@@ -218,6 +432,35 @@ def Test_TSP(input=None, *, overrides=None):
         },
     }
 
+
+    sac_config: SACConfig = {
+        "gamma": [0.99],
+        "actor_lr": [3e-4],
+        "actor_hidden_nn": [[64, 64]],
+        "critic_lr": [3e-4],
+        "critic_hidden_nn": [[64, 64]],
+        "FULL_EPISODE_UPDATES": [True],
+        "TN_step": [1],
+        "alpha": [0.2],
+        "alpha_lr": [3e-3],
+        "auto_tune_alpha": [True],
+        "target_entropy_ratio": [0.01],
+        "tau": [0.005],
+        "legend_parameters": {
+            "gamma": [r"γ:", False],
+            "actor_lr": [r"A-α:", True],
+            "critic_lr": [r"C-β:", False],
+            "actor_hidden_nn": [r"A-NN:", True],
+            "critic_hidden_nn": [r"C-NN", False],
+            "FULL_EPISODE_UPDATES": [r"Full-Ep:", True],
+            "TN_step": [r"TN:", False],
+            "alpha": [r"$α_{ent}$:", False],
+            "alpha_lr": [r"$α_{ent}$-lr:", False],
+            "auto_tune_alpha": [r"At-α:", False],
+            "target_entropy_ratio": [r"$Hr$:", False],
+            "tau": [r"$τ$:", False],
+        },
+    }
 
 
     # TSP-DRL-Test (submodule): the Attention Model (Kool et al. 2019) trained
@@ -256,9 +499,9 @@ def Test_TSP(input=None, *, overrides=None):
     # programmatic ``overrides`` and the command-line overrides below.
     _config_targets: Dict[str, Any] = {
         "global_config": global_config,
-    #    "a2c_config": a2c_config,
+        "a2c_config": a2c_config,
         "ppo_config": ppo_config,
-    #    "sac_config": sac_config,
+        "sac_config": sac_config,
         "tsp_test_config": tsp_test_config,
         "included_algorithms": included_algorithms,
     }
@@ -306,7 +549,7 @@ def Test_TSP(input=None, *, overrides=None):
     grp_g.add_argument("--n-eval-episodes", type=int, dest="global__n_eval_episodes")
     grp_g.add_argument("--base-seed", type=int, dest="global__base_seed")
     grp_g.add_argument("--baseline-model", type=str, dest="global__baseline_model",
-                       help="A2C | PPO | SAC | TSP_TEST | BELLO | None")
+                       help="A2C | PPO | SAC | None")
     grp_g.add_argument("--n-use-trained-model", type=int, dest="global__n_use_trained_model")
     grp_g.add_argument("--action-selection-method", type=str,
                        dest="global__action_selection_method", help="e.g. sample | argmax")
@@ -318,7 +561,7 @@ def Test_TSP(input=None, *, overrides=None):
     grp_g.add_argument("--use-existing-disk-data", type=_str2bool, nargs="?", const=True,
                        dest="global__use_existing_disk_data")
 
-    cli.add_argument("--algos", nargs="+", choices=["A2C", "PPO", "SAC", "TSP_TEST", "BELLO"],
+    cli.add_argument("--algos", nargs="+", choices=["A2C", "PPO", "SAC", "TSP_TEST"],
                      dest="included_algos",
                      help="enable exactly these algorithms (the rest are disabled)")
 
@@ -366,7 +609,7 @@ def Test_TSP(input=None, *, overrides=None):
     if cli_args.included_algos is not None:
         cli_overrides.setdefault("included_algorithms", {}).update(
             {name: (name in cli_args.included_algos)
-             for name in ("A2C", "PPO", "SAC", "TSP_TEST", "BELLO")}
+             for name in ("A2C", "PPO", "SAC", "TSP_TEST")}
         )
 
     for _section, _values in cli_overrides.items():
@@ -388,11 +631,11 @@ def Test_TSP(input=None, *, overrides=None):
         _baseline_upper = str(_baseline_model).upper()
         if _baseline_upper == "NONE":
             pass
+        elif _baseline_upper == "BELLO":
+            # Pointer-Network baseline; handled as a dedicated path inside
+            # run_selected_experiments, not as an included A2C/SAC/PPO experiment.
+            pass
         elif _baseline_upper in included_algorithms:
-            # A2C/SAC/PPO run as a regular experiment whose curve is reused as the
-            # benchmark; TSP_TEST and BELLO are dedicated-runner methods that are
-            # likewise enabled here so their curve is produced and promoted to the
-            # benchmark inside run_selected_experiments.
             included_algorithms[_baseline_upper] = True
         else:
             raise ValueError(
@@ -400,14 +643,14 @@ def Test_TSP(input=None, *, overrides=None):
                 "Use one of: A2C, SAC, PPO, TSP_TEST, Bello, NONE (or None)."
             )
 
-    algo_order = ["A2C", "SAC", "PPO", "TSP_TEST", "BELLO"]
+    algo_order = ["A2C", "SAC", "PPO", "TSP_TEST"]
     experiments = [name for name in algo_order if included_algorithms.get(name, False)]
 
     stochastic_duration_matrix_mean = run_selected_experiments(
         experiments,
         global_config=global_config,
-    #    a2c_config=a2c_config,
-    #    sac_config=sac_config,
+        a2c_config=a2c_config,
+        sac_config=sac_config,
         ppo_config=ppo_config,
         tsp_test_config=tsp_test_config,
     )

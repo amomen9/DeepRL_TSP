@@ -1,7 +1,8 @@
 """
 Library_bello_baseline.py - run the TSP-DRL_Bello Pointer Network as a baseline.
 
-When ``global_config['baseline_model'] == 'Bello'`` the orchestrator drives the
+When ``included_algorithms['BELLO']`` is enabled (or
+``global_config['baseline_model'] == 'Bello'``) the orchestrator drives the
 (re-architected) Bello actor/critic through the shared parallel pool via three
 entrypoints - :func:`prepare_bello_baseline` (disk reuse / top-up decision),
 :func:`_run_single_bello_rep` (the pickle-safe per-rep pool worker) and
@@ -9,8 +10,9 @@ entrypoints - :func:`prepare_bello_baseline` (disk reuse / top-up decision),
 *same* fixed ``duration_matrix`` instance the RL agents see, under the main-repo
 standards (``eval_interval``, ``n_timesteps``, ``n_repetitions``,
 ``max_episode_length``, ``base_seed``), and returns a learning curve in the same
-``(lc_mean, lc_std, timesteps, raw_returns)`` shape so it can be drawn as the
-benchmark curve.
+``(lc_mean, lc_std, timesteps, raw_returns)`` shape so it is drawn next to the
+A2C/PPO/SAC curves - or promoted to the benchmark curve when it is selected as
+the ``baseline_model``.
 
 Design (matches the agreed plan)
 --------------------------------
@@ -74,6 +76,12 @@ _BELLO_ALGO = "BELLO"
 # never keys on the repetition count: every repetition stored in BELLO.xlsx is
 # loaded, and only the shortfall ``target - disk`` is trained to top it up.
 BELLO_N_REPETITIONS = 5
+
+# Legend label for the Bello curve - drawn as a regular experiment curve when
+# BELLO is enabled in ``included_algorithms``, or as the benchmark curve when it
+# is selected as ``global_config['baseline_model']``. Cosmetic; never
+# participates in disk matching.
+BELLO_CURVE_LABEL = "Bello baseline"
 
 
 def _bello_repo_dir() -> str:
@@ -304,9 +312,9 @@ def prepare_bello_baseline(
     forced True for Bello (a matching workbook is always consulted).
 
     Returns a plan dict:
-      ``{"status": "ready", "result": (lc_mean, lc_std, timesteps, raw_or_None)}``
+      ``{"status": "ready", "result": (...), "curve_label": str}``
           nothing to train (fully covered by disk / legacy workbook).
-      ``{"status": "train", "n_to_train": int, ...}``
+      ``{"status": "train", "n_to_train": int, "curve_label": str, ...}``
           train ``n_to_train`` reps in the pool, then call
           :func:`finalize_bello_baseline`.
     """
@@ -351,7 +359,7 @@ def prepare_bello_baseline(
                 lc_std = np.asarray(entry["learning_curve_std"], dtype=np.float32)
                 ts = np.asarray(entry["timesteps"], dtype=np.int32)
                 print(f"[BELLO] Loaded baseline curve from {excel_path} (no per-rep data; reused as-is).")
-                return {"status": "ready", "result": (lc, lc_std, ts, None)}
+                return {"status": "ready", "result": (lc, lc_std, ts, None), "curve_label": BELLO_CURVE_LABEL}
             else:
                 print(
                     "[BELLO] Disk per-rep grid differs from the current standards; "
@@ -377,7 +385,11 @@ def prepare_bello_baseline(
             f"[BELLO] Loaded all {disk_reps} repetition(s) from {excel_path} "
             f"(>= target {target_reps}); no training needed."
         )
-        return {"status": "ready", "result": (lc_mean, lc_std, timesteps_grid, raw_returns)}
+        return {
+            "status": "ready",
+            "result": (lc_mean, lc_std, timesteps_grid, raw_returns),
+            "curve_label": BELLO_CURVE_LABEL,
+        }
 
     if disk_reps > 0:
         print(
@@ -418,6 +430,7 @@ def prepare_bello_baseline(
         "disk_raw": disk_raw,
         "duration_matrix": duration_matrix,
         "n_cities": int(n_cities),
+        "curve_label": BELLO_CURVE_LABEL,
         "timesteps_grid": timesteps_grid,
         "n_timesteps": int(n_timesteps),
         "eval_interval": int(eval_interval),
@@ -507,8 +520,8 @@ def finalize_bello_baseline(
     ``new_rep_results`` is the list of ``(curve, best_tour, best_cost)`` tuples
     returned by :func:`_run_single_bello_rep` for this run's reps, in rep order.
     Assembles the mean/std curve, saves the combined workbook, draws the
-    reconstructed-route plot, and returns ``(lc_mean, lc_std, timesteps,
-    raw_returns)``.
+    reconstructed-route plot, and returns ``((lc_mean, lc_std, timesteps,
+    raw_returns), curve_label)``.
     """
     from .Helper_excel import save_algorithm_workbook
 
@@ -520,6 +533,7 @@ def finalize_bello_baseline(
     excel_path = plan["excel_path"]
     base_filename = plan["base_filename"]
     match_hp = plan["match_hp"]
+    curve_label = plan.get("curve_label", BELLO_CURVE_LABEL)
 
     new_curves = []
     overall_best_cost = float("inf")
@@ -558,7 +572,7 @@ def finalize_bello_baseline(
     save_hp = dict(match_hp)
     save_hp["n_repetitions"] = int(raw_returns.shape[0])
     bello_job = {
-        "curve_label": "Bello baseline",
+        "curve_label": curve_label,
         "method": "bello",
         "hyperparams": save_hp,
     }
@@ -590,4 +604,4 @@ def finalize_bello_baseline(
         except Exception as exc:
             print(f"[BELLO] Could not draw reconstructed-coordinate plot: {exc}")
 
-    return result_tuple
+    return result_tuple, curve_label
