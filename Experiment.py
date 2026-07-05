@@ -151,7 +151,7 @@ def Test_TSP(input=None, *, overrides=None):
         "TSP_Optimal_Cost": best_cost,
         "TSP_Best_Cost": best_cost,
         "TSP_Worst_Cost": worst_cost,
-        "use_existing_disk_data": False,
+        "use_existing_disk_data": True,
         # Checkpoint reuse / continuation (imported from the CartPole fork).
         #   use_saved_disk_networks_checkpoints -> when True, each repetition loads
         #       a matching saved actor/critic from Checkpoints/TSP/<ALGO>/ and

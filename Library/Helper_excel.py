@@ -185,8 +185,23 @@ def _sheet_hp_text(value: Any) -> str:
 
 
 def _sheet_hp_text_candidates(value: Any) -> list[str]:
-    """Return the normalized text candidate(s) for a config value."""
-    return [_sheet_hp_text(value)]
+    """Return the normalized text candidate(s) a stored sheet value may equal.
+
+    A swept hyperparameter is expressed as a list/tuple/ndarray whose *elements*
+    are the individual candidate values (e.g. ``FULL_EPISODE_UPDATES=[True, False]``
+    or ``actor_hidden_nn=[[128, 128], [256, 256]]``). Each setting sheet stores one
+    resolved value, so every sweep element is a valid candidate. The whole-value
+    text is kept as a candidate too, so a value given without its outer sweep list
+    (e.g. a bare ``actor_hidden_nn=[128, 128]``) still matches its own sheet.
+    """
+    candidates = [_sheet_hp_text(value)]
+    if isinstance(value, (list, tuple, np.ndarray)):
+        elements = value.tolist() if isinstance(value, np.ndarray) else list(value)
+        for element in elements:
+            element_text = _sheet_hp_text(element)
+            if element_text not in candidates:
+                candidates.append(element_text)
+    return candidates
 
 
 def _filter_config_for_comparison(config: dict[str, Any] | None, excluded_keys: frozenset[str]) -> dict[str, str]:

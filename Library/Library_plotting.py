@@ -169,6 +169,11 @@ class LearningCurvePlot:
             color = self.ax.get_lines()[-1].get_color()  # match the last plotted line
         self.ax.fill_between(x_arr, y_lower, y_upper,
                              alpha=fill_opacity, color=color)
+        # Return the (capped) band so callers can fold its extent into the
+        # y-limits — otherwise the shaded band can rise above the mean curve's
+        # max and get hidden under the legend (notably on smoothed plots, where
+        # the mean is a clean plateau but the band still extends past it).
+        return y_lower, y_upper
 
     def set_ylim(self,lower,upper):
         self.ax.set_ylim(lower, upper)
@@ -176,11 +181,54 @@ class LearningCurvePlot:
     def add_hline(self,height,label):
         self.ax.axhline(height,ls='--',c='k',label=label)
 
+    def _reserve_legend_headroom(self, legend, upper_gap_frac=1.0 / 6.0, lower_margin_frac=1.0 / 4.0):
+        '''Apply the display margins around the tracked data extent.
+
+        On entry the axes y-limits are the *exact* tracked data extent
+        ``(y_min, y_max)`` (mean curves + CI bands + benchmark). This method
+        expands them to:
+          * a lower margin of ``lower_margin_frac`` * range below ``y_min``;
+          * an upper gap of ``upper_gap_frac`` * range between ``y_max`` and the
+            **bottom of the legend box**, so the highest curve/band sits just
+            below the top-anchored legend and nothing hides under it.
+
+        The legend is anchored in axes-fraction coordinates, so its bottom edge
+        stays at a fixed fraction of the axes regardless of the y-limits. We read
+        that fraction once and solve for the top limit that puts the legend box
+        bottom exactly ``upper_gap_frac`` * range above ``y_max``.'''
+        if legend is None:
+            return
+        y_min, y_max = self.ax.get_ylim()
+        data_range = y_max - y_min
+        if not np.isfinite(data_range) or data_range <= 0:
+            return
+        try:
+            self.fig.canvas.draw()  # realise renderer + final axes/legend geometry
+            renderer = self.fig.canvas.get_renderer()
+            leg_bbox = legend.get_window_extent(renderer)
+            ax_bbox = self.ax.get_window_extent(renderer)
+        except Exception:
+            return
+        if ax_bbox.height <= 0:
+            return
+        # Legend box bottom as a fraction of the axes height (0 = axes bottom,
+        # 1 = axes top). Clamp so an oversized legend can't blow up the solve.
+        leg_bottom_frac = (leg_bbox.y0 - ax_bbox.y0) / ax_bbox.height
+        leg_bottom_frac = min(max(leg_bottom_frac, 0.15), 0.999)
+
+        y_lower = y_min - lower_margin_frac * data_range
+        legend_bottom_data = y_max + upper_gap_frac * data_range
+        # Map legend_bottom_data -> leg_bottom_frac in the new limits:
+        #   (legend_bottom_data - y_lower) / (y_upper - y_lower) = leg_bottom_frac
+        y_upper = y_lower + (legend_bottom_data - y_lower) / leg_bottom_frac
+        self.ax.set_ylim(y_lower, y_upper)
+
     def save(self, name='test.png', out_dir="plots"):
         ''' name: string for filename of saved figure
             out_dir: directory to save into when ``name`` is not absolute
                      (e.g. "Trial Continuation Analysis" in checkpoint-reuse mode) '''
-        self.ax.legend(
+        legend = self.ax.legend(
+            loc="upper center",
             fontsize=8,
             handlelength=1.2,
             handletextpad=0.4,
@@ -189,6 +237,7 @@ class LearningCurvePlot:
             borderaxespad=0.3,
         )
         self.fig.tight_layout(rect=(0, 0, 1, 0.90))
+        self._reserve_legend_headroom(legend)
         output_path = name
         if not os.path.isabs(name):
             os.makedirs(out_dir, exist_ok=True)

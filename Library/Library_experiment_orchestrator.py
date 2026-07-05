@@ -136,7 +136,6 @@ def run_selected_experiments(
     plot_smoothing_window = gc.get("plot_smoothing_window", np.array([1]))
     curve_confidence_interval = gc.get("curve_confidence_interval", 0.6)
     curve_shaded_area_opacity = gc.get("curve_shaded_area_opacity", 0.05)
-    plot_trim_margin = float(gc.get("plot_trim_margin", 5.0))
     use_existing_disk_data = gc.get("use_existing_disk_data", True)
     # Checkpoint reuse / continuation (imported from the CartPole fork). When
     # 'use_saved_disk_networks_checkpoints' is True each repetition loads a
@@ -808,7 +807,7 @@ def run_selected_experiments(
                     pc["y_max"] = max(pc["y_max"], float(np.max(plot_values)))
                     pc["y_min"] = min(pc["y_min"], float(np.min(plot_values)))
                 if shade_ci and n_for_ci is not None:
-                    plot_obj.add_shaded_ci(
+                    band = plot_obj.add_shaded_ci(
                         timesteps_arr.tolist(), plot_values.tolist(), lc_std_w.tolist(), n=int(n_for_ci),
                         alpha=curve_ci_alpha, fill_opacity=curve_shaded_area_opacity,
                         y_lower_cap=None,
@@ -818,6 +817,14 @@ def run_selected_experiments(
                             else float(optimum_return)
                         ),
                     )
+                    # Fold the shaded band's extent into the y-limits so the top
+                    # of the band (mean + CI margin) is never hidden under the
+                    # legend on smoothed plots.
+                    if band is not None:
+                        band_lower, band_upper = band
+                        if band_upper.size:
+                            pc["y_max"] = max(pc["y_max"], float(np.max(band_upper)))
+                            pc["y_min"] = min(pc["y_min"], float(np.min(band_lower)))
 
     for idx, job in enumerate(all_setting_jobs):
         res = setting_results[idx]
@@ -889,6 +896,11 @@ def run_selected_experiments(
                 benchmark_steps_arr.tolist(), benchmark_returns_arr.tolist(),
                 label=benchmark_name, ls=":", c="gray",
             )
+            # The benchmark is a curve too — fold it into the y-limits so it
+            # cannot hide under the legend when it is the highest line.
+            if benchmark_returns_arr.size:
+                pc["y_max"] = max(float(pc["y_max"]), float(np.max(benchmark_returns_arr)))
+                pc["y_min"] = min(float(pc["y_min"]), float(np.min(benchmark_returns_arr)))
         if optimum_return is not None:
             plot_obj.add_hline(optimum_return, label="TSP optimum")
             x_left = float(plot_obj.ax.get_xlim()[0])
@@ -905,36 +917,40 @@ def run_selected_experiments(
             plot_obj.ax.plot([], [], label="Memory Insufficient", ls="--", c="k")
 
     opt = optimum_return
-    legend_headroom = 0.0
 
+    # Set the y-limits to the EXACT tracked data extent (mean curves + CI bands +
+    # benchmark; see y_max/y_min accumulation above). The display margins are
+    # applied later, in LearningCurvePlot.save():
+    #   * lower margin = 1/4 of the tracked range, below y_min;
+    #   * upper gap    = 1/6 of the tracked range, between y_max and the legend
+    #                    box bottom (so the highest curve/band sits just below
+    #                    the legend and nothing hides under it).
+    # save() needs the legend's real height for the upper gap, which is why the
+    # margins are not baked in here.
     for pc in plot_configs:
         y_min_curves = float(pc.get("y_min", float("inf")))
         y_max_curves = float(pc.get("y_max", float("-inf")))
 
         if np.isfinite(y_min_curves) and np.isfinite(y_max_curves) and y_max_curves >= y_min_curves:
             if opt is not None:
+                # DP optimum available: it is the ceiling (curves are capped at it).
                 least_value = min(opt, y_min_curves)
                 most_value = max(opt, y_max_curves)
             else:
+                # DP skipped (memory insufficient): the biggest value across all
+                # curves, CI bands and timesteps becomes the ceiling instead.
                 least_value = y_min_curves
                 most_value = y_max_curves
 
-            y_range_data = max(most_value - least_value, 0.0)
-            margin = y_range_data / max(plot_trim_margin, 1e-12)
+            if most_value <= least_value:  # degenerate range guard
+                most_value = least_value + 1.0
 
-            expected_legend_entries = len(all_setting_jobs) + len(extra_curves) + 2
-            legend_headroom = expected_legend_entries * (most_value - least_value) / 4
-            if extra_curves:
-                total_entries = len(all_setting_jobs) + len(extra_curves) + 2
-                legend_headroom = total_entries * (most_value - least_value) / 4
-
-            y_lower = least_value - margin
-            y_upper_trimmed = most_value + margin
-            y_upper_final = y_upper_trimmed + legend_headroom
+            y_lower = least_value
+            y_upper_final = most_value
         else:
             if opt is not None:
                 y_lower = opt - 1.0
-                y_upper_final = opt + legend_headroom
+                y_upper_final = opt + 1.0
             else:
                 y_lower = 0.0
                 y_upper_final = 1.0
