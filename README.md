@@ -107,7 +107,7 @@ is `O(city_t)` — so the speedup **grows with instance size**.
   bit-identical, gradients within tolerance) and exits non-zero on divergence
   (`python test_ptr_precompute.py` from the submodule).
 
-This mirrors what the POMO Attention Model (the `TSP-DRL-Test` submodule) already
+This mirrors what the POMO Attention Model (the `TSP-DeepRL-POMO` submodule) already
 does by construction — compute the decoder keys/values once per instance and
 reuse them across all decode steps — bringing Bello's forward in line with it.
 
@@ -136,16 +136,16 @@ main experiment runner ([Library/Library_bello_baseline.py](Library/Library_bell
 
 ---
 
-## Bundled submodule: `TSP-DRL-Test` — POMO Attention Model baseline
+## Bundled submodule: `TSP-DeepRL-POMO` — POMO Attention Model baseline
 
-The `TSP-DRL-Test/` submodule is the second, stronger policy-network contender:
+The `TSP-DeepRL-POMO/` submodule is the second, stronger policy-network contender:
 the **Attention Model** (Kool, van Hoof & Welling, ICLR 2019) trained with
 **POMO** — *Policy Optimization with Multiple Optima* (Kwon et al., NeurIPS
 2020). It targets the same policy-learning task as Bello but with a modern,
 critic-free recipe, and is designed to beat it at a much smaller budget.
 
-**Repository:** `amomen9/TSP-DRL-Test` —
-<https://github.com/amomen9/TSP-DRL-Test>. Unlike the Bello submodule this is not
+**Repository:** `amomen9/TSP-DeepRL-POMO` —
+<https://github.com/amomen9/TSP-DeepRL-POMO>. Unlike the Bello submodule this is not
 a fork of a single upstream repo but an independent implementation of AM + POMO;
 the full method write-up lives in the submodule's own README.
 
@@ -155,7 +155,7 @@ A tour is still built city by city from a stochastic policy factorised by the
 chain rule, exactly as in Bello et al. — but every component around it is
 upgraded:
 
-| Component | Bello et al. 2017 (`TSP-DRL_Bello`) | `TSP-DRL-Test` (AM + POMO) |
+| Component | Bello et al. 2017 (`TSP-DRL_Bello`) | `TSP-DeepRL-POMO` (AM + POMO) |
 |---|---|---|
 | Encoder | LSTM over the city *sequence* (imposes an ordering on a set) | Multi-head self-attention stack (permutation-invariant, no recurrence) |
 | Decoder | LSTM + 1 attention glimpse | Context attention (graph + first + last node), multi-head glimpse, clipped single-head pointer |
