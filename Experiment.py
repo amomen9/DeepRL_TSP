@@ -148,6 +148,11 @@ def Test_TSP(input=None, *, overrides=None):
         "curve_shaded_area_opacity": 0.05,
         "curve_plot": True,
         "animation_plot": False,
+        # At the end of each run (after the blocking plots are closed) prune the
+        # "plots" and "Trial Continuation Analysis" dirs at depth 0: drop runs
+        # beyond the newest 3 OR older than a week, and thin surviving older runs
+        # to a single smoothed window (151>201>101>...). Set False to disable.
+        "cleanup_output_files": True,
         "TSP_Optimal_Cost": best_cost,
         "TSP_Best_Cost": best_cost,
         "TSP_Worst_Cost": worst_cost,

@@ -68,6 +68,7 @@ EXCLUDED_GLOBAL_CONFIG_KEYS = frozenset({
     "curve_shaded_area_opacity",
     "curve_plot",
     "animation_plot",
+    "cleanup_output_files",
     "use_existing_disk_data",
     "Environment",
     "baseline_model",

@@ -214,6 +214,13 @@ def run_selected_experiments(
     start_time = time.perf_counter()
     start_human = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     print(f"Policy-based experiment started at: {start_human}\n")
+
+    # Fix this run's id (execution-start timestamp) once, up front: every output
+    # file written below is stamped with it, and the end-of-run cleanup uses it
+    # to group depth-0 files by run when pruning "plots" / continuation dirs.
+    from .Library_output_cleanup import configure_run_id, cleanup_output_dirs
+    run_id = configure_run_id()
+    cleanup_output_files = bool(gc.get("cleanup_output_files", True))
     # Disabled (kept for reference): output.log generation
     # with open("output.log", "w", encoding="utf-8") as f:
     #     f.write(f"Start the process at: {start_human}\n")
@@ -1017,6 +1024,8 @@ def run_selected_experiments(
             fig_combined.tight_layout()
             combined_filename = f"Twin_{plot_filename_tag}_w101-w201-combined.png"
             combined_path = os.path.join(plots_dir, combined_filename)
+            from .Library_output_cleanup import stamp_run_id
+            combined_path = stamp_run_id(combined_path)
             from .Helper_progress_bar import get_unique_filepath
             combined_path = get_unique_filepath(combined_path)
             fig_combined.savefig(combined_path, dpi=300)
@@ -1046,6 +1055,22 @@ def run_selected_experiments(
         )
     except Exception as exc:
         print(f"[summary] Failed to build returns summary table: {exc}")
+
+    # ── End-of-run cleanup ───────────────────────────────────────────────────
+    # Runs after the blocking plots were closed by the user and after the
+    # current run's artifacts (plots + continuation summary) have all been
+    # written and stamped with this run's id, so the current run is fully
+    # protected. Prunes depth-0 files only, per the age + smoothing-window rules.
+    if cleanup_output_files:
+        try:
+            cleanup_output_dirs(
+                ["plots", "Trial Continuation Analysis"],
+                run_id=run_id,
+                keep_runs=3,
+                max_age_days=7,
+            )
+        except Exception as exc:
+            print(f"[cleanup] Failed to prune output directories: {exc}")
 
     total_time = (time.perf_counter() - start_time) / 60.0
     # Disabled (kept for reference): output.log generation

@@ -110,6 +110,7 @@ class GlobalConfig(TypedDict, total=False):
     curve_shaded_area_opacity: float
     curve_plot: bool
     animation_plot: bool
+    cleanup_output_files: bool
     TSP_Optimal_Cost: Optional[float]
     TSP_Best_Cost: Optional[float]
     TSP_Worst_Cost: Optional[float]

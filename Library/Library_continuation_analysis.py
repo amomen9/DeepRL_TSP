@@ -152,7 +152,11 @@ def build_returns_summary_table(
 
     os.makedirs(output_dir, exist_ok=True)
 
-    csv_path = os.path.join(output_dir, "results_summary.csv")
+    # Tag the artifacts with the run id so each run's summary is kept distinct
+    # and the end-of-run cleanup can group/prune them like the plots.
+    from .Library_output_cleanup import stamp_run_id
+
+    csv_path = stamp_run_id(os.path.join(output_dir, "results_summary.csv"))
     with open(csv_path, "w", encoding="utf-8") as f:
         f.write(",".join(headers) + "\n")
         for r in rows_data:
@@ -166,7 +170,7 @@ def build_returns_summary_table(
             ]) + "\n")
     result["csv_path"] = csv_path
 
-    md_path = os.path.join(output_dir, "results_summary.md")
+    md_path = stamp_run_id(os.path.join(output_dir, "results_summary.md"))
     with open(md_path, "w", encoding="utf-8") as f:
         f.write(f"# {title}\n\n")
         f.write("| " + " | ".join(headers) + " |\n")

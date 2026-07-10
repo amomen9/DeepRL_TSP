@@ -91,7 +91,9 @@ def plot_route_on_reconstructed_coords(
 
     coords, _temp = reconstruct_coordinates_from_route(duration_matrix, tour, seed=seed)
     os.makedirs(out_dir, exist_ok=True)
-    out_path = os.path.join(out_dir, filename)
+    # Tag with the run id so the end-of-run cleanup groups it with this run.
+    from .Library_output_cleanup import stamp_run_id
+    out_path = stamp_run_id(os.path.join(out_dir, filename))
 
     closed = list(tour) + [tour[0]]
     xs = coords[closed, 0]

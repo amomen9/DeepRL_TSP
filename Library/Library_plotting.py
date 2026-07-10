@@ -243,6 +243,10 @@ class LearningCurvePlot:
             os.makedirs(out_dir, exist_ok=True)
             output_path = os.path.join(out_dir, os.path.basename(name))
 
+        # Tag the filename with the run's execution-start id so the end-of-run
+        # cleanup can group this file with the rest of the current run.
+        from .Library_output_cleanup import stamp_run_id
+        output_path = stamp_run_id(output_path)
         from .Helper_progress_bar import get_unique_filepath
         output_path = get_unique_filepath(output_path)
         self.fig.savefig(output_path, dpi=300)
