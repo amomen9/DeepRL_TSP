@@ -173,7 +173,7 @@ def Test_TSP(input=None, *, overrides=None):
         #       on these matrices regardless of this flag. Set False to restore
         #       the legacy n_actions/architecture-only checkpoint matching.
         "checkpoints": {
-            "use_saved_disk_networks_checkpoints": False,
+            "use_saved_disk_networks_checkpoints": True,
             "skip_selection_hyperparameter_match": True,
             "match_training_matrices": True,
         },
