@@ -42,10 +42,13 @@ class TSP_SAC_Agent(TSP_Policy_Based_Agent):
         self.tau = float(tau)
         self._update_count = 0
 
-        # Second Q-network for clipped double-Q learning.
+        # Second Q-network for clipped double-Q learning. Its input width tracks
+        # the env's observation like the base agent's networks do, so SAC keeps
+        # working if it is ever pointed at the enriched observation.
         self.critic2 = Value_NN(
             nn_hidden_layer_widths=critic_hidden_nn,
             output_size=self.n_actions,
+            input_size=self.n_observations,
         )
         self.critic2_optimizer = torch.optim.Adam(self.critic2.parameters(), lr=critic_lr)
 

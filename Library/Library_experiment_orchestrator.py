@@ -86,6 +86,15 @@ def _build_pg_setting_tasks(
                 value_coef=float(kw.get("value_coef", 0.5)),
                 full_episode_updates=bool(kw.get("full_episode_updates", True)),
                 rollout_steps=int(kw.get("rollout_steps", 2048)),
+                observation_mode=str(kw.get("observation_mode", "legacy")),
+                actor_arch=str(kw.get("actor_arch", "mlp")),
+                advantage_mode=str(kw.get("advantage_mode", "gae")),
+                group_size=int(kw.get("group_size", 8)),
+                eval_n_starts=int(kw.get("eval_n_starts", 1)),
+                pointer_embed=int(kw.get("pointer_embed", 128)),
+                pointer_n_heads=int(kw.get("pointer_n_heads", 8)),
+                pointer_n_layers=int(kw.get("pointer_n_layers", 2)),
+                pointer_ff_hidden=int(kw.get("pointer_ff_hidden", 256)),
                 checkpoint_suffix=f"S{sp + 1}",
                 use_saved_disk_networks_checkpoints=use_saved_disk_networks_checkpoints,
                 skip_selection_hyperparameter_match=skip_selection_hyperparameter_match,
@@ -1106,6 +1115,15 @@ def _build_pg_checkpoint_metadata(
     TN_step=None,
     instance_matrices_text=None,
     instance_matrix_hash=None,
+    observation_mode="legacy",
+    actor_arch="mlp",
+    advantage_mode="gae",
+    group_size=None,
+    eval_n_starts=None,
+    pointer_embed=128,
+    pointer_n_heads=8,
+    pointer_n_layers=2,
+    pointer_ff_hidden=256,
 ):
     """Build the sidecar metadata dict for an actor/critic checkpoint.
 
@@ -1149,6 +1167,26 @@ def _build_pg_checkpoint_metadata(
             "value_coef": float(value_coef),
             "rollout_steps": int(rollout_steps) if rollout_steps is not None else None,
         })
+        # Representation / baseline knobs are recorded only when they leave their
+        # legacy value, so sidecars written before they existed keep matching
+        # (see _REPRESENTATION_STRICT_DEFAULTS in Library_checkpointing).
+        optional = {
+            "observation_mode": (str(observation_mode), "legacy"),
+            "actor_arch": (str(actor_arch), "mlp"),
+            "advantage_mode": (str(advantage_mode), "gae"),
+        }
+        if str(actor_arch).lower() == "pointer":
+            optional.update({
+                "pointer_embed": (int(pointer_embed), 128),
+                "pointer_n_heads": (int(pointer_n_heads), 8),
+                "pointer_n_layers": (int(pointer_n_layers), 2),
+                "pointer_ff_hidden": (int(pointer_ff_hidden), 256),
+            })
+        if str(advantage_mode).lower() == "group" and group_size is not None:
+            optional["group_size"] = (int(group_size), None)
+        if eval_n_starts is not None and int(eval_n_starts) != 1:
+            optional["eval_n_starts"] = (int(eval_n_starts), 1)
+        md.update({k: v for k, (v, legacy) in optional.items() if v != legacy})
     else:
         md["TN_step"] = int(TN_step) if TN_step is not None else None
     return md
@@ -1217,6 +1255,15 @@ def _report_checkpoint_loads(
                 TN_step=kw.get("TN_step"),
                 instance_matrices_text=_instance_text,
                 instance_matrix_hash=_instance_hash,
+                observation_mode=kw.get("observation_mode", "legacy"),
+                actor_arch=kw.get("actor_arch", "mlp"),
+                advantage_mode=kw.get("advantage_mode", "gae"),
+                group_size=kw.get("group_size"),
+                eval_n_starts=kw.get("eval_n_starts"),
+                pointer_embed=kw.get("pointer_embed", 128),
+                pointer_n_heads=kw.get("pointer_n_heads", 8),
+                pointer_n_layers=kw.get("pointer_n_layers", 2),
+                pointer_ff_hidden=kw.get("pointer_ff_hidden", 256),
             )
             source = resolve_continuation_source(
                 checkpoint_path=actor_ck.file_path,
@@ -1269,6 +1316,15 @@ def _run_single_repetition(
     value_coef=0.5,
     full_episode_updates=True,
     rollout_steps=None,
+    observation_mode="legacy",
+    actor_arch="mlp",
+    advantage_mode="gae",
+    group_size=8,
+    eval_n_starts=1,
+    pointer_embed=128,
+    pointer_n_heads=8,
+    pointer_n_layers=2,
+    pointer_ff_hidden=256,
     checkpoint_suffix=None,
     use_saved_disk_networks_checkpoints=False,
     skip_selection_hyperparameter_match=False,
@@ -1332,6 +1388,15 @@ def _run_single_repetition(
             TN_step=TN_step,
             instance_matrices_text=_instance_text,
             instance_matrix_hash=_instance_hash,
+            observation_mode=observation_mode,
+            actor_arch=actor_arch,
+            advantage_mode=advantage_mode,
+            group_size=group_size,
+            eval_n_starts=eval_n_starts,
+            pointer_embed=pointer_embed,
+            pointer_n_heads=pointer_n_heads,
+            pointer_n_layers=pointer_n_layers,
+            pointer_ff_hidden=pointer_ff_hidden,
         )
         _actor_md = _build_pg_checkpoint_metadata(component="Actor", **_md_common)
         _critic_md = _build_pg_checkpoint_metadata(component="Critic", **_md_common)
@@ -1394,6 +1459,10 @@ def _run_single_repetition(
         from PPO import run_TSP_ppo
 
         env_rep_PPO = copy.deepcopy(env)
+        # The observation representation is a per-setting PPO knob, so it is
+        # applied to this repetition's private copy: the shared instance (and
+        # every other algorithm reading it) is left on the legacy 4-D state.
+        env_rep_PPO.set_observation_mode(observation_mode)
         agent = TSP_PPO_Agent(
             env_rep_PPO,
             actor_hidden_nn=actor_hidden_nn,
@@ -1406,6 +1475,12 @@ def _run_single_repetition(
             n_epochs=n_epochs,
             entropy_coef=entropy_coef,
             value_coef=value_coef,
+            advantage_mode=advantage_mode,
+            actor_arch=actor_arch,
+            pointer_embed=pointer_embed,
+            pointer_n_heads=pointer_n_heads,
+            pointer_n_layers=pointer_n_layers,
+            pointer_ff_hidden=pointer_ff_hidden,
         )
         _load_into_agent(agent)
         rep_returns, rep_timesteps = run_TSP_ppo(
@@ -1422,6 +1497,9 @@ def _run_single_repetition(
             reseed_noise_seed=run_seed,
             full_episode_updates=full_episode_updates,
             rollout_steps=rollout_steps,
+            advantage_mode=advantage_mode,
+            group_size=group_size,
+            eval_n_starts=eval_n_starts,
         )
     elif policy_based_method == "sac":
         from SAC_Agent import TSP_SAC_Agent
@@ -1480,6 +1558,17 @@ def _run_single_repetition(
                 "run_seed": int(run_seed),
                 "rep_index": int(rep_index),
                 "checkpoint_suffix": checkpoint_suffix,
+                # Enough to rebuild the right network class/width at eval time
+                # (Use_Trained_Model / Library_checkpoint_eval); older payloads
+                # omit these and are read back as the legacy MLP on a 4-D state.
+                "input_dim": int(getattr(agent, "n_observations", 4)),
+                "observation_mode": str(getattr(agent, "observation_mode", "legacy")),
+                "actor_arch": str(getattr(agent, "actor_arch", "mlp")),
+                "city_feature_dim": int(getattr(agent, "city_feature_dim", 0)),
+                "pointer_embed": int(pointer_embed),
+                "pointer_n_heads": int(pointer_n_heads),
+                "pointer_n_layers": int(pointer_n_layers),
+                "pointer_ff_hidden": int(pointer_ff_hidden),
             }
 
         actor_payload = _payload_for(agent.actor, actor_hidden_nn)

@@ -14,6 +14,29 @@ from Library.Library_env_elements import (
 from Library.Library_dp import should_skip_dp_due_to_memory
 
 
+# ── Observation layout ───────────────────────────────────────────────────────
+#
+# ``observation_mode='legacy'`` keeps the original 4-D observation. It is not a
+# Markov state: it carries only *how many* cities are visited, never *which*,
+# and it never exposes a single duration-matrix entry, so the policy picks the
+# next city with no idea how far any city is.
+#
+# ``observation_mode='enriched'`` prepends one feature block per *action slot*
+# (action ``a`` <-> ``_available_cities()[a]``, so the block is aligned with the
+# policy logits and the invalid-action mask), then appends the legacy 4 scalars
+# unchanged - the legacy observation is a strict suffix of the enriched one,
+# which is what makes the two modes a clean A/B.
+#
+# Per-action features (all normalized by the largest duration in the instance):
+#   0. D[current_location, city] - cost of going there right now
+#   1. D[city, depot]            - cost of closing the tour from there
+#   2. visited flag              - 1.0 when the slot is already used (invalid)
+#   3. mean D[city, unvisited]   - how central the city is w.r.t. what is left
+ENRICHED_CITY_FEATURES = 4
+ENRICHED_GLOBAL_FEATURES = 4
+OBSERVATION_MODES = ("legacy", "enriched")
+
+
 class StochasticTSPEnvironment:
     """A stochastic TSP problem instance.
 
@@ -62,6 +85,7 @@ class StochasticTSPEnvironment:
         initialize_noise=False,
         seed=None,
         depot_city=None,
+        observation_mode="legacy",
     ):
         # Backward-compatible argument handling: many call sites pass the
         # duration matrix as the first positional argument ('cls(matrix)').
@@ -81,6 +105,17 @@ class StochasticTSPEnvironment:
         self.stochastic_duration_matrix = None
         self.effective_noise_matrix = None
         self.seed = seed
+
+        if observation_mode not in OBSERVATION_MODES:
+            raise ValueError(
+                f"observation_mode must be one of {OBSERVATION_MODES}, got {observation_mode!r}."
+            )
+        self.observation_mode = str(observation_mode)
+        # Per-episode cache of the action->city map, invalidated whenever the
+        # depot changes (it cycles across resets). Rebuilding the list on every
+        # step would make the enriched observation O(n) slower than it needs to be.
+        self._avail_cache = None
+        self._avail_cache_depot = None
 
         # Depot cycles across resets / reseeds.
         #   current_depot_city = depot used for the active episode
@@ -114,6 +149,10 @@ class StochasticTSPEnvironment:
 
         self.n = int(self.duration_matrix.shape[0])
         self.n_cities = self.n
+
+        # Fixed normalizer for the enriched per-city duration features. Computed
+        # once: the duration matrix never changes over the env's lifetime.
+        self._obs_cost_scale = float(max(1e-8, np.max(self.duration_matrix)))
 
         # Resolve the starting depot now that the number of cities is known.
         # depot_city=None  -> random depot in 0..n-1 (seeded by 'seed' when given
@@ -358,8 +397,47 @@ class StochasticTSPEnvironment:
     # Gym-like API
     # ------------------------------------------------------------------
 
-    def _build_observation(self):
-        """Build a 4D observation vector for the policy network."""
+    # ── Observation construction ─────────────────────────────────────────────
+
+    @property
+    def observation_dim(self):
+        """Length of the vector returned by ``_build_observation``."""
+        if self.observation_mode == "enriched":
+            return self.n_actions * ENRICHED_CITY_FEATURES + ENRICHED_GLOBAL_FEATURES
+        return ENRICHED_GLOBAL_FEATURES
+
+    @property
+    def city_feature_dim(self):
+        """Per-action feature count in the enriched observation (0 in legacy
+        mode, where the observation carries no per-city block at all)."""
+        return ENRICHED_CITY_FEATURES if self.observation_mode == "enriched" else 0
+
+    def set_observation_mode(self, mode):
+        """Switch the observation representation and rebuild the current ``obs``.
+
+        Called on a per-repetition *copy* of the environment, so one sweep can
+        A/B 'legacy' against 'enriched' without disturbing the shared instance.
+        """
+        if mode not in OBSERVATION_MODES:
+            raise ValueError(
+                f"observation_mode must be one of {OBSERVATION_MODES}, got {mode!r}."
+            )
+        self.observation_mode = str(mode)
+        self.obs = self._build_observation()
+        return self.obs
+
+    def _available_cities_array(self):
+        """``_available_cities()`` as a cached index array (rebuilt on depot change)."""
+        if self._avail_cache is None or self._avail_cache_depot != self.current_depot_city:
+            self._avail_cache = np.array(
+                [city for city in range(self.n) if city != self.current_depot_city],
+                dtype=np.intp,
+            )
+            self._avail_cache_depot = self.current_depot_city
+        return self._avail_cache
+
+    def _build_legacy_observation(self):
+        """The original 4D observation vector (see the module-level note)."""
         max_city_index = max(1, self.n - 1)
         max_state_index = max(1, self.n_states - 1)
         max_cost = float(max(1.0, np.max(self.duration_matrix) * max(1, self.n)))
@@ -372,6 +450,44 @@ class StochasticTSPEnvironment:
             ],
             dtype=np.float32,
         )
+
+    def _build_enriched_observation(self):
+        """Per-action duration features followed by the legacy 4 scalars.
+
+        Row ``a`` of the per-action block describes the city action ``a`` would
+        move to, so the block lines up with the policy logits and the
+        invalid-action mask. Uses ``duration_matrix`` (the deterministic base the
+        planner can reason about), never ``stochastic_duration_matrix``: the
+        sampled noise stays unknown to the agent, exactly as before - it is still
+        only ever observed one entry at a time, through the reward.
+        """
+        duration_matrix = self.duration_matrix
+        scale = self._obs_cost_scale
+        available = self._available_cities_array()
+        current = int(self.current_location)
+        depot = int(self.current_depot_city)
+
+        visited = np.zeros(self.n, dtype=bool)
+        if self.current_visited_cities:
+            visited[list(self.current_visited_cities)] = True
+
+        features = np.empty((available.size, ENRICHED_CITY_FEATURES), dtype=np.float32)
+        features[:, 0] = duration_matrix[current, available] / scale
+        features[:, 1] = duration_matrix[available, depot] / scale
+        features[:, 2] = visited[available]
+        unvisited = np.flatnonzero(~visited)
+        if unvisited.size:
+            features[:, 3] = duration_matrix[np.ix_(available, unvisited)].mean(axis=1) / scale
+        else:
+            features[:, 3] = 0.0  # tour complete: nothing left to be central to
+
+        return np.concatenate((features.reshape(-1), self._build_legacy_observation()))
+
+    def _build_observation(self):
+        """Build the observation vector for the policy network (see ``observation_mode``)."""
+        if self.observation_mode == "enriched":
+            return self._build_enriched_observation()
+        return self._build_legacy_observation()
 
     def reset(self):
         """Set the agent back to the current depot city and return the initial state."""

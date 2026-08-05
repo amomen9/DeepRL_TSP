@@ -27,7 +27,11 @@ class TSP_PPO_Agent(TSP_Policy_Based_Agent):
                  n_epochs=4,
                  entropy_coef=0.01,
                  value_coef=0.5,
-                 max_grad_norm=0.5):
+                 max_grad_norm=0.5,
+                 advantage_mode='gae',
+                 actor_arch='mlp',
+                 pointer_embed=128, pointer_n_heads=8, pointer_n_layers=2,
+                 pointer_ff_hidden=256, pointer_clip_logits=10.0):
         super().__init__(
             env,
             actor_hidden_nn=actor_hidden_nn,
@@ -37,6 +41,12 @@ class TSP_PPO_Agent(TSP_Policy_Based_Agent):
             gamma=gamma,
             use_critic=True,
             critic_type='V',
+            actor_arch=actor_arch,
+            pointer_embed=pointer_embed,
+            pointer_n_heads=pointer_n_heads,
+            pointer_n_layers=pointer_n_layers,
+            pointer_ff_hidden=pointer_ff_hidden,
+            pointer_clip_logits=pointer_clip_logits,
         )
         self.gae_lambda = float(gae_lambda)
         self.clip_epsilon = float(clip_epsilon)
@@ -44,6 +54,7 @@ class TSP_PPO_Agent(TSP_Policy_Based_Agent):
         self.entropy_coef = float(entropy_coef)
         self.value_coef = float(value_coef)
         self.max_grad_norm = float(max_grad_norm)
+        self.advantage_mode = str(advantage_mode).lower()
 
     def compute_gae(self, rewards, dones, values, next_values):
         """Generalized Advantage Estimation (Schulman et al., 2016).
@@ -72,12 +83,34 @@ class TSP_PPO_Agent(TSP_Policy_Based_Agent):
         returns = advantages + values.detach()
         return advantages, returns
 
+    def compute_returns_to_go(self, rewards, dones):
+        """Discounted return-to-go, reset at terminals. Used as the critic's
+        regression target when the advantage comes from the group baseline
+        (there is no GAE ``returns`` to reuse in that mode)."""
+        T = len(rewards)
+        out = [0.0] * T
+        running = 0.0
+        for t in reversed(range(T)):
+            if dones[t]:
+                running = 0.0
+            running = float(rewards[t]) + self.gamma * running
+            out[t] = running
+        return torch.tensor(out, dtype=torch.float32)
+
     def update(self, **kwargs):
         """PPO update on one trajectory.
 
         Computes old log-probs and advantages once (frozen baseline), then
         performs ``n_epochs`` of full-batch updates with the clipped surrogate
         objective and a value-function regression target.
+
+        When the caller supplies ``advantages`` (the POMO-style shared baseline
+        assembled by ``PPO._run_group_ppo``), those are used verbatim and the
+        critic is bypassed as a baseline: the advantage is then unbiased by
+        construction instead of coming from a learned V estimate. The critic is
+        still regressed onto the return-to-go when ``value_coef > 0``, so
+        checkpoints stay uniform across modes; set ``value_coef = 0`` to drop it
+        entirely (POMO trains no critic at all).
         """
         states = kwargs["states"]
         actions = kwargs["actions"]
@@ -85,10 +118,17 @@ class TSP_PPO_Agent(TSP_Policy_Based_Agent):
         next_states = kwargs["next_states"]
         dones = kwargs["dones"]
         masks = kwargs.get("masks")
+        external_advantages = kwargs.get("advantages")
 
         states_t = torch.as_tensor(np.array(states), dtype=torch.float32)
         actions_t = torch.as_tensor(np.array(actions), dtype=torch.long)
-        next_states_t = torch.as_tensor(np.array(next_states), dtype=torch.float32)
+        # The group-baseline path never bootstraps off V(s'), so skip building
+        # the next-state batch there (it is the largest tensor in the update
+        # once the observation carries a per-city block).
+        next_states_t = (
+            None if external_advantages is not None
+            else torch.as_tensor(np.array(next_states), dtype=torch.float32)
+        )
 
         # Invalid-action mask captured at rollout time (per state). Applying it
         # to the policy logits here keeps the update distribution identical to
@@ -107,13 +147,24 @@ class TSP_PPO_Agent(TSP_Policy_Based_Agent):
         assert self.critic is not None
         assert self.critic_optimizer is not None
 
+        # The critic is trained whenever value_coef > 0; it is only *used* as the
+        # advantage baseline in GAE mode.
+        train_critic = float(self.value_coef) > 0.0
+
         with torch.no_grad():
-            values = self.critic(states_t).squeeze(-1)
-            next_values = self.critic(next_states_t).squeeze(-1)
             old_dist = _masked_dist(self.actor(states_t))
             old_log_probs = old_dist.log_prob(actions_t)
+            if external_advantages is None:
+                values = self.critic(states_t).squeeze(-1)
+                next_values = self.critic(next_states_t).squeeze(-1)
 
-        advantages, returns = self.compute_gae(rewards, dones, values, next_values)
+        if external_advantages is not None:
+            advantages = torch.as_tensor(
+                np.asarray(external_advantages, dtype=np.float32), dtype=torch.float32
+            )
+            returns = self.compute_returns_to_go(rewards, dones)
+        else:
+            advantages, returns = self.compute_gae(rewards, dones, values, next_values)
 
         # Advantage normalization improves PPO stability when a trajectory has
         # enough samples; for tiny trajectories (T<2) we skip it.
@@ -138,11 +189,12 @@ class TSP_PPO_Agent(TSP_Policy_Based_Agent):
                 torch.nn.utils.clip_grad_norm_(self.actor.parameters(), self.max_grad_norm)
             self.actor_optimizer.step()
 
-            v_pred = self.critic(states_t).squeeze(-1)
-            critic_loss = self.value_coef * ((v_pred - returns) ** 2).mean()
+            if train_critic:
+                v_pred = self.critic(states_t).squeeze(-1)
+                critic_loss = self.value_coef * ((v_pred - returns) ** 2).mean()
 
-            self.critic_optimizer.zero_grad()
-            critic_loss.backward()
-            if self.max_grad_norm > 0:
-                torch.nn.utils.clip_grad_norm_(self.critic.parameters(), self.max_grad_norm)
-            self.critic_optimizer.step()
+                self.critic_optimizer.zero_grad()
+                critic_loss.backward()
+                if self.max_grad_norm > 0:
+                    torch.nn.utils.clip_grad_norm_(self.critic.parameters(), self.max_grad_norm)
+                self.critic_optimizer.step()

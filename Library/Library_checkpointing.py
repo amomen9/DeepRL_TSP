@@ -264,6 +264,28 @@ def _get_n_actions(metadata: dict | None):
 # under loose matching, exactly like ``n_actions``.
 _ARCHITECTURE_STRICT_KEYS = ("actor_hidden_nn", "critic_hidden_nn")
 
+# Fields that select a different *network class* or input width rather than a
+# different layer size, so no amount of resizing makes the weights compatible:
+# the observation representation and the actor architecture (plus the attention
+# dimensions, which matter only when the actor is the pointer network).
+#
+# These are recorded in a sidecar only when they differ from the legacy value,
+# so checkpoints written before the knobs existed stay reusable. That means a
+# missing key must be *compared as* the legacy default on both sides rather than
+# treated as "no constraint" -- otherwise a legacy target would happily try to
+# load a pointer checkpoint and blow up in ``load_state_dict``.
+_REPRESENTATION_STRICT_DEFAULTS = {
+    "observation_mode": "legacy",
+    "actor_arch": "mlp",
+    "pointer_embed": 128,
+    "pointer_n_heads": 8,
+    "pointer_n_layers": 2,
+    "pointer_ff_hidden": 256,
+}
+_POINTER_ONLY_STRICT_KEYS = (
+    "pointer_embed", "pointer_n_heads", "pointer_n_layers", "pointer_ff_hidden",
+)
+
 
 def _n_actions_match(candidate_metadata, target_metadata) -> bool:
     """The unconditional weight-compatibility gate: a checkpoint trained for a
@@ -301,6 +323,12 @@ def _candidate_passes_strict_fields(candidate_metadata, target_metadata) -> bool
         return False
     for key in _ARCHITECTURE_STRICT_KEYS:
         if key in target_metadata and candidate_metadata.get(key) != target_metadata.get(key):
+            return False
+    is_pointer = str(target_metadata.get("actor_arch", "mlp")).lower() == "pointer"
+    for key, default in _REPRESENTATION_STRICT_DEFAULTS.items():
+        if key in _POINTER_ONLY_STRICT_KEYS and not is_pointer:
+            continue  # attention dims do not shape the MLP actor's weights
+        if candidate_metadata.get(key, default) != target_metadata.get(key, default):
             return False
     return True
 

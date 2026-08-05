@@ -207,6 +207,45 @@ def Test_TSP(input=None, *, overrides=None):
         "entropy_coef": [0.01],      
         "value_coef": [0.5],                # 0.5 # coefficient for the value loss term in the PPO objective which controls the relative importance of the value function loss compared to the policy loss. Default: 0.5.
         "rollout_steps": [512],             # 1024 # of env steps per rollout (PPO buffer size) which controls how many steps of data we collect in each rollout before we perform policy updates. Default: 2048. Set to a large number (e.g., 1e6) to skip rollout length trials and effectively use the entire episode as one rollout.
+
+        # ── Representation / baseline knobs ──────────────────────────────────
+        # These close the three structural gaps against TSP_TEST (POMO-AM). All
+        # are sweepable, so a single run can A/B them; the first value of each
+        # list below is the legacy behaviour, and a setting that leaves every
+        # knob at its legacy value reuses the PPO workbooks/checkpoints it
+        # already has on disk (the keys only join the disk-matching key when
+        # they are non-default).
+        #
+        # observation_mode -- "legacy": the original 4-D state (current city,
+        #   dead DP index, visited COUNT, cost so far). It never exposes a
+        #   duration-matrix entry and never says WHICH cities are visited, so it
+        #   is not Markov and the policy picks blind. "enriched": prepends one
+        #   feature block per action slot (cost to that city now, cost from it
+        #   back to the depot, visited flag, its mean cost to the unvisited set)
+        #   and keeps the 4 legacy scalars as a suffix. NECESSARY BUT NOT
+        #   SUFFICIENT: measured on a 10-city instance, enriching the state and
+        #   leaving actor_arch="mlp" barely moved the optimality gap (21.9% ->
+        #   20.3%). The MLP cannot exploit a per-city block addressed by fixed
+        #   action slots - pair it with actor_arch="pointer" (-> 6.6%).
+        "observation_mode": ["legacy", "enriched"],
+        # actor_arch -- "mlp": Policy_NN, one logit per fixed action index.
+        #   "pointer": attention encoder over the per-action feature block +
+        #   glimpse/pointer decoder (Kool 2019), so an action is chosen because
+        #   of the city's own features. Requires observation_mode="enriched".
+        "actor_arch": ["mlp"],
+        # advantage_mode -- "gae": the current GAE + learned V-critic baseline.
+        #   "group": POMO's shared baseline (Kwon 2020) - roll out `group_size`
+        #   episodes of the same instance/depot with distinct forced first moves
+        #   and centre each return on the group mean. Unbiased by construction,
+        #   unlike a V-critic reading an aliased state, and the group advances in
+        #   lockstep so each decode step is one batched forward pass.
+        "advantage_mode": ["gae"],
+        "group_size": [8],                  # episodes per group update (advantage_mode="group" only)
+        "eval_n_starts": [1],               # 1 = the original single greedy rollout; k>1 keeps the best of k forced starts per eval episode (costs k x n env steps per eval episode)
+        "pointer_embed": [128],             # attention actor: embedding width (must be divisible by pointer_n_heads)
+        "pointer_n_heads": [8],             # attention actor: heads
+        "pointer_n_layers": [2],            # attention actor: encoder self-attention layers
+        "pointer_ff_hidden": [256],         # attention actor: encoder feed-forward width
         "legend_parameters": {
             "gamma": [r"γ:", True],
             "actor_lr": [r"A-α:", True],
@@ -220,6 +259,15 @@ def Test_TSP(input=None, *, overrides=None):
             "entropy_coef": [r"ent:", False],
             "value_coef": [r"val:", False],
             "rollout_steps": [r"roll:", False],
+            "observation_mode": [r"obs:", True],
+            "actor_arch": [r"actor:", True],
+            "advantage_mode": [r"adv:", True],
+            "group_size": [r"grp:", False],
+            "eval_n_starts": [r"starts:", False],
+            "pointer_embed": [r"p-emb:", False],
+            "pointer_n_heads": [r"p-h:", False],
+            "pointer_n_layers": [r"p-L:", False],
+            "pointer_ff_hidden": [r"p-ff:", False],
         },
     }
 

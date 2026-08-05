@@ -18,7 +18,7 @@ import os
 import numpy as np
 import torch
 
-from Library.Library_networks import Policy_NN
+from Library.Library_networks import actor_from_payload
 from Library.Library_env_elements import format_tour
 from Classic_TSP_DP import (
     _format_route_edge_costs,
@@ -67,6 +67,13 @@ def _select_action(actor, obs, n_actions, env, action_selection_method):
 
 
 def _rollout_on_env(env, actor, action_selection_method):
+    # Actors are used round-robin and may come from checkpoints trained on
+    # different observation representations, so put the env into this actor's
+    # representation before resetting (a no-op for the legacy 4-D default).
+    required_mode = getattr(actor, "tsp_observation_mode", None)
+    if required_mode is not None and hasattr(env, "set_observation_mode"):
+        if getattr(env, "observation_mode", "legacy") != required_mode:
+            env.set_observation_mode(required_mode)
     obs, _ = env.reset()
     n_actions = env.n_actions
     depot = env.current_depot_city
@@ -154,13 +161,9 @@ def evaluate_trained_model_on_matrices(
             skipped_ckpts.append((p, ckpt_n_actions))
             continue
 
-        ckpt_actor_hidden_nn = payload.get("actor_hidden_nn", actor_hidden_nn)
-        actor = Policy_NN(
-            nn_hidden_layer_widths=np.asarray(ckpt_actor_hidden_nn, dtype=np.int32),
-            output_size=expected_n_actions,
+        actor, _obs_mode = actor_from_payload(
+            payload, n_actions=expected_n_actions, fallback_hidden_nn=actor_hidden_nn
         )
-        actor.load_state_dict(payload["state_dict"])
-        actor.eval()
         actors.append(actor)
 
     if not actors:

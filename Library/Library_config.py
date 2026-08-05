@@ -60,6 +60,16 @@ class PPOConfig(TypedDict, total=False):
     entropy_coef: List[float]
     value_coef: List[float]
     rollout_steps: List[int]
+    # Representation / baseline knobs (see Experiment.py's ppo_config).
+    observation_mode: List[str]
+    actor_arch: List[str]
+    advantage_mode: List[str]
+    group_size: List[int]
+    eval_n_starts: List[int]
+    pointer_embed: List[int]
+    pointer_n_heads: List[int]
+    pointer_n_layers: List[int]
+    pointer_ff_hidden: List[int]
     legend_parameters: Dict[str, list]
 
 

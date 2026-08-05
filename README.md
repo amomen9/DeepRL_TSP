@@ -8,6 +8,68 @@ A TSP instance is defined by three matrices held on the environment:
 - `uncertainty_inclusion_matrix` (I) — which edges carry uncertainty,
 - `potential_uncertainty_matrix` (U) — per-edge upper bound of the noise.
 
+## PPO representation / baseline knobs
+
+The PPO agent originally saw a **4-D observation** — current city, a (dead) DP
+index, the *count* of visited cities, and the cost so far. That state never
+exposes a single duration-matrix entry and never says *which* cities are
+visited, so it is not Markov (states needing different optimal actions look
+identical) and the policy chooses among ~*n* candidates blind. This is the main
+structural reason the `TSP_TEST` (POMO-AM) contender dominates it: that method
+reads the whole matrix. Three `ppo_config` knobs close the gap; each is
+sweepable, so one run can A/B them, and **the first value listed is the original
+behaviour**.
+
+| Knob | Values | Effect |
+|---|---|---|
+| `observation_mode` | `"legacy"` / `"enriched"` | `enriched` prepends one feature block **per action slot** — cost to that city now, cost from it back to the depot, visited flag, its mean cost to the unvisited set — and keeps the 4 legacy scalars as a suffix (so legacy ⊂ enriched). Width goes 4 → `4·(n−1)+4`. |
+| `actor_arch` | `"mlp"` / `"pointer"` | `pointer` replaces the MLP with an attention encoder over that per-city block plus a glimpse/clipped-pointer decoder (Kool et al. 2019), so an action is picked *because of* its city's features rather than by fixed index. Requires `observation_mode="enriched"`. |
+| `advantage_mode` | `"gae"` / `"group"` | `group` replaces GAE + the learned V-critic with POMO's **shared baseline** (Kwon et al. 2020): `group_size` episodes of the same instance and depot, with distinct forced first moves, each centred on the group mean. Unbiased by construction, and the group advances in lockstep so each decode step is one *batched* forward pass. |
+
+Supporting knobs: `group_size`, `eval_n_starts` (>1 keeps the best of *k* forced
+greedy starts per evaluation episode — POMO's multi-start decode), and
+`pointer_embed` / `pointer_n_heads` / `pointer_n_layers` / `pointer_ff_hidden`.
+
+### Measured effect
+
+10-city instance (so the optimum is brute-forceable), 3 seeds, 15 000 env steps,
+gap against the exact optimal tour:
+
+| configuration | final gap | best gap | wall/seed |
+|---|---|---|---|
+| `legacy` + `mlp` + `gae` (original) | 21.9 % | 16.4 % | 21 s |
+| `enriched` + `mlp` + `gae` | 20.3 % | 18.9 % | 21 s |
+| `enriched` + `pointer` + `gae` | 6.6 % | **0.0 %** | 119 s |
+| `enriched` + `pointer` + `group` | **2.8 %** | **0.0 %** | 24 s |
+
+The headline is that **the enriched observation on its own does almost nothing**
+(21.9 % → 20.3 %, inside the seed noise): it is necessary but not sufficient,
+because the MLP actor still addresses cities by fixed action slot and cannot
+exploit a per-city feature block. Only once the pointer actor reads that block
+does the gap collapse (→ 6.6 %, and the exact optimum is reached in every seed).
+The group baseline then improves the *final* policy further (→ 2.8 %) **and**
+runs 5× faster than the same actor under GAE, because the group's episodes
+advance in lockstep through one batched forward pass.
+
+Notes:
+
+- Invalid sweep corners (`pointer` + `legacy`) are dropped with a printed note,
+  and axes that are inert for a combo (the rollout buffer under `group`, the
+  attention dims under `mlp`) are collapsed so a broad sweep does not emit
+  duplicate curves.
+- **Cost.** Measured on an 80-city instance, per 5·10⁵ env steps: legacy+MLP
+  ≈ 7 min, enriched+MLP ≈ 10 min, enriched+pointer+GAE ≈ 100 min,
+  enriched+pointer+**group** ≈ 51 min (batching halves it). The enriched
+  observation itself is nearly free (+11 s); the attention actor is what costs.
+- **Disk compatibility.** These keys join the Excel-matching hyperparameters and
+  the checkpoint sidecar *only when non-default*, so a run left on the legacy
+  settings keeps reusing the workbooks and checkpoints it already has. A
+  checkpoint trained under a different representation or actor class can never
+  be loaded into the current one (it is weight-incompatible), enforced even
+  under loose matching.
+
+---
+
 ## Disk reuse and instance matching
 
 Results (`data sheets/<ALGO>.xlsx`) and network checkpoints

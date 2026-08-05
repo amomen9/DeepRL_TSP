@@ -22,7 +22,7 @@ import os
 import numpy as np
 import torch
 
-from .Library_networks import Policy_NN
+from .Library_networks import actor_from_payload
 
 
 def _open_in_file_explorer(path):
@@ -54,13 +54,9 @@ def _load_actor(checkpoint_path, expected_n_actions, fallback_hidden_nn):
     ckpt_n_actions = int(payload.get("n_actions", expected_n_actions))
     if ckpt_n_actions != expected_n_actions:
         return None, ckpt_n_actions
-    hidden_nn = payload.get("actor_hidden_nn", fallback_hidden_nn)
-    actor = Policy_NN(
-        nn_hidden_layer_widths=np.asarray(hidden_nn, dtype=np.int32),
-        output_size=expected_n_actions,
+    actor, _obs_mode = actor_from_payload(
+        payload, n_actions=expected_n_actions, fallback_hidden_nn=fallback_hidden_nn
     )
-    actor.load_state_dict(payload["state_dict"])
-    actor.eval()
     return actor, ckpt_n_actions
 
 

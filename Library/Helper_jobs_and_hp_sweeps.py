@@ -10,9 +10,58 @@ _build_a2c_jobs          - Build A2C setting jobs.
 _build_ppo_jobs          - Build PPO setting jobs.
 _build_sac_jobs          - Build SAC setting jobs.
 """
+import itertools
+
 import numpy as np
 
 from .Helper_legend import _build_legend_parts, _resolve_legend_flags
+
+
+# PPO knobs added for the representation / baseline work. A setting that leaves
+# one of these at its legacy value is behaviourally identical to the pre-change
+# PPO, so the key is omitted from the disk-matching hyperparameters below and
+# such runs keep reusing the workbooks and checkpoints they already have. Any
+# non-default value is recorded and therefore gets its own row.
+_PPO_LEGACY_DEFAULTS = {
+    "observation_mode": "legacy",
+    "actor_arch": "mlp",
+    "advantage_mode": "gae",
+    "group_size": 8,
+    "eval_n_starts": 1,
+    "pointer_embed": 128,
+    "pointer_n_heads": 8,
+    "pointer_n_layers": 2,
+    "pointer_ff_hidden": 256,
+}
+
+
+def _sweep_axis(cfg, key, default, cast=None):
+    """Normalize one config entry into a list of values to sweep.
+
+    Accepts a bare scalar, a list/tuple, or a numpy array, so a config may write
+    either ``"actor_arch": "pointer"`` or ``"actor_arch": ["mlp", "pointer"]``.
+    """
+    raw = cfg.get(key, default)
+    if isinstance(raw, (str, bytes)):
+        values = [raw]
+    elif isinstance(raw, np.ndarray):
+        values = np.atleast_1d(raw).tolist()
+    elif isinstance(raw, (list, tuple)):
+        values = list(raw)
+    else:
+        values = [raw]
+    if not values:
+        values = default if isinstance(default, (list, tuple)) else [default]
+    return [cast(v) for v in values] if cast is not None else values
+
+
+def _parse_hidden_nn(raw):
+    """Normalize a hidden-layer config into a list of int32 width arrays."""
+    if isinstance(raw, np.ndarray) and raw.ndim == 1:
+        return [raw]
+    if isinstance(raw, list) and len(raw) > 0 and not isinstance(raw[0], (list, np.ndarray)):
+        return [np.asarray(raw, dtype=np.int32)]
+    return [np.asarray(arch, dtype=np.int32) for arch in raw]
 
 
 def build_algorithm_filename(algo_name: str) -> str:
@@ -123,108 +172,145 @@ def _build_a2c_jobs(*, algo_config, n_repetitions, n_timesteps, eval_interval,
 def _build_ppo_jobs(*, algo_config, n_repetitions, n_timesteps, eval_interval,
                     max_episode_length, base_seed):
     cfg = algo_config
-    gammas, actor_learning_rates, actor_architectures, legend = _parse_pg_config(cfg)
-    critic_learning_rates = np.atleast_1d(np.asarray(cfg.get("critic_lr", np.array([0.001])), dtype=np.float32))
-    raw_critic_nn = cfg.get("critic_hidden_nn", [[64, 64]])
-    if isinstance(raw_critic_nn, np.ndarray) and raw_critic_nn.ndim == 1:
-        critic_architectures = [raw_critic_nn]
-    elif isinstance(raw_critic_nn, list) and len(raw_critic_nn) > 0 and not isinstance(raw_critic_nn[0], (list, np.ndarray)):
-        critic_architectures = [np.asarray(raw_critic_nn, dtype=np.int32)]
-    else:
-        critic_architectures = [np.asarray(arch, dtype=np.int32) for arch in raw_critic_nn]
-    gae_lambdas = np.atleast_1d(np.asarray(cfg.get("gae_lambda", np.array([0.95])), dtype=np.float32))
-    clip_epsilons = np.atleast_1d(np.asarray(cfg.get("clip_epsilon", np.array([0.2])), dtype=np.float32))
-    n_epochs_sweep = np.atleast_1d(np.asarray(cfg.get("n_epochs", np.array([4])), dtype=np.int32))
-    entropy_coefs = np.atleast_1d(np.asarray(cfg.get("entropy_coef", np.array([0.01])), dtype=np.float32))
-    value_coefs = np.atleast_1d(np.asarray(cfg.get("value_coef", np.array([0.5])), dtype=np.float32))
-    rollout_steps_sweep = np.atleast_1d(np.asarray(cfg.get("rollout_steps", np.array([2048])), dtype=np.int64))
-    full_episode_updates_sweep = np.atleast_1d(np.asarray(cfg.get("FULL_EPISODE_UPDATES", np.array([True]))))
+    _gammas, _actor_lrs, _actor_nns, legend = _parse_pg_config(cfg)
+
+    # Sweep axes, in the order the nested loops used to visit them (the last
+    # axis varies fastest, exactly as before) so an unchanged config still
+    # produces its settings in the same order -- checkpoint suffixes S1/S2/...
+    # and previously saved workbooks stay aligned. The representation/baseline
+    # axes are appended at the end for the same reason.
+    axes = {
+        "gamma": [float(v) for v in _gammas],
+        "actor_hidden_nn": [np.asarray(a, dtype=np.int32) for a in _actor_nns],
+        "actor_lr": [float(v) for v in _actor_lrs],
+        "critic_hidden_nn": _parse_hidden_nn(cfg.get("critic_hidden_nn", [[64, 64]])),
+        "critic_lr": _sweep_axis(cfg, "critic_lr", [0.001], float),
+        "gae_lambda": _sweep_axis(cfg, "gae_lambda", [0.95], float),
+        "clip_epsilon": _sweep_axis(cfg, "clip_epsilon", [0.2], float),
+        "n_epochs": _sweep_axis(cfg, "n_epochs", [4], int),
+        "entropy_coef": _sweep_axis(cfg, "entropy_coef", [0.01], float),
+        "value_coef": _sweep_axis(cfg, "value_coef", [0.5], float),
+        "FULL_EPISODE_UPDATES": _sweep_axis(cfg, "FULL_EPISODE_UPDATES", [True], bool),
+        "rollout_steps": _sweep_axis(cfg, "rollout_steps", [2048], int),
+        "observation_mode": _sweep_axis(cfg, "observation_mode", ["legacy"], str),
+        "actor_arch": _sweep_axis(cfg, "actor_arch", ["mlp"], str),
+        "advantage_mode": _sweep_axis(cfg, "advantage_mode", ["gae"], str),
+        "group_size": _sweep_axis(cfg, "group_size", [8], int),
+        "eval_n_starts": _sweep_axis(cfg, "eval_n_starts", [1], int),
+        "pointer_embed": _sweep_axis(cfg, "pointer_embed", [128], int),
+        "pointer_n_heads": _sweep_axis(cfg, "pointer_n_heads", [8], int),
+        "pointer_n_layers": _sweep_axis(cfg, "pointer_n_layers", [2], int),
+        "pointer_ff_hidden": _sweep_axis(cfg, "pointer_ff_hidden", [256], int),
+    }
 
     setting_jobs = []
-    for gamma_val in gammas:
-        gamma_val = float(gamma_val)
-        for actor_nn in actor_architectures:
-            actor_nn = np.asarray(actor_nn, dtype=np.int32)
-            for actor_lr_val in actor_learning_rates:
-                actor_lr_val = float(actor_lr_val)
-                for critic_nn in critic_architectures:
-                    critic_nn = np.asarray(critic_nn, dtype=np.int32)
-                    for critic_lr_val in critic_learning_rates:
-                        critic_lr_val = float(critic_lr_val)
-                        for gae_lambda_val in gae_lambdas:
-                            gae_lambda_val = float(gae_lambda_val)
-                            for clip_eps_val in clip_epsilons:
-                                clip_eps_val = float(clip_eps_val)
-                                for n_epochs_val in n_epochs_sweep:
-                                    n_epochs_val = int(n_epochs_val)
-                                    for ent_coef_val in entropy_coefs:
-                                        ent_coef_val = float(ent_coef_val)
-                                        for val_coef_val in value_coefs:
-                                            val_coef_val = float(val_coef_val)
-                                            for full_ep_val in full_episode_updates_sweep:
-                                                full_ep_bool = bool(full_ep_val)
-                                                for rollout_steps_val in rollout_steps_sweep:
-                                                    rollout_steps_val = int(rollout_steps_val)
-                                                    iter_cfg = {
-                                                        **cfg,
-                                                        "gamma": gamma_val,
-                                                        "actor_lr": actor_lr_val,
-                                                        "actor_hidden_nn": actor_nn,
-                                                        "critic_lr": critic_lr_val,
-                                                        "critic_hidden_nn": critic_nn,
-                                                        "gae_lambda": gae_lambda_val,
-                                                        "clip_epsilon": clip_eps_val,
-                                                        "n_epochs": n_epochs_val,
-                                                        "entropy_coef": ent_coef_val,
-                                                        "value_coef": val_coef_val,
-                                                        "rollout_steps": rollout_steps_val,
-                                                        "FULL_EPISODE_UPDATES": full_ep_bool,
-                                                    }
-                                                    label_parts = ["PPO"] + _build_legend_parts(legend, iter_cfg)
-                                                    curve_label = ", ".join(label_parts)
-                                                    setting_jobs.append({
-                                                        "curve_label": curve_label,
-                                                        "method": "ppo",
-                                                        "kwargs": dict(
-                                                            method="ppo",
-                                                            n_repetitions=n_repetitions,
-                                                            n_timesteps=n_timesteps,
-                                                            eval_interval=eval_interval,
-                                                            max_episode_length=max_episode_length,
-                                                            actor_lr=actor_lr_val,
-                                                            critic_lr=critic_lr_val,
-                                                            gamma=gamma_val,
-                                                            actor_hidden_nn=actor_nn,
-                                                            critic_hidden_nn=critic_nn,
-                                                            gae_lambda=gae_lambda_val,
-                                                            clip_epsilon=clip_eps_val,
-                                                            n_epochs=n_epochs_val,
-                                                            entropy_coef=ent_coef_val,
-                                                            value_coef=val_coef_val,
-                                                            full_episode_updates=full_ep_bool,
-                                                            rollout_steps=rollout_steps_val,
-                                                            base_seed=base_seed,
-                                                            plot_smoothing_window=1,
-                                                        ),
-                                                        "hyperparams": {
-                                                            "n_repetitions": n_repetitions,
-                                                            "n_timesteps": n_timesteps,
-                                                            "eval_interval": eval_interval,
-                                                            "max_episode_length": max_episode_length,
-                                                            "actor_lr": actor_lr_val,
-                                                            "critic_lr": critic_lr_val,
-                                                            "gamma": gamma_val,
-                                                            "actor_hidden_nn": str(actor_nn.tolist()),
-                                                            "critic_hidden_nn": str(critic_nn.tolist()),
-                                                            "gae_lambda": gae_lambda_val,
-                                                            "clip_epsilon": clip_eps_val,
-                                                            "n_epochs": n_epochs_val,
-                                                            "entropy_coef": ent_coef_val,
-                                                            "value_coef": val_coef_val,
-                                                            "rollout_steps": rollout_steps_val,
-                                                            "FULL_EPISODE_UPDATES": full_ep_bool,
-                                                        },
-                                                    })
+    skipped_pointer_legacy = 0
+    seen_effective = set()
+    for combo in itertools.product(*axes.values()):
+        v = dict(zip(axes.keys(), combo))
+
+        # The pointer actor reads the per-city feature block, which only the
+        # enriched observation has. Sweeping both axes is the natural way to ask
+        # for "legacy+mlp vs enriched+mlp vs enriched+pointer", so the impossible
+        # corner is dropped rather than raised on.
+        if v["actor_arch"] == "pointer" and v["observation_mode"] != "enriched":
+            skipped_pointer_legacy += 1
+            continue
+        if v["actor_arch"] == "pointer" and v["pointer_embed"] % v["pointer_n_heads"]:
+            raise ValueError(
+                f"ppo_config: pointer_embed ({v['pointer_embed']}) must be divisible by "
+                f"pointer_n_heads ({v['pointer_n_heads']})."
+            )
+
+        # Several axes are inert for a given combo (the group loop reads neither
+        # the rollout buffer nor GAE; the MLP actor ignores the attention dims).
+        # Collapsing them keeps a broad sweep from emitting duplicate curves that
+        # would train identically and plot on top of each other.
+        inert = set()
+        if v["advantage_mode"] == "group":
+            inert |= {"rollout_steps", "FULL_EPISODE_UPDATES", "gae_lambda"}
+        else:
+            inert.add("group_size")
+        if v["actor_arch"] != "pointer":
+            inert |= {"pointer_embed", "pointer_n_heads", "pointer_n_layers",
+                      "pointer_ff_hidden"}
+        effective = tuple(
+            (k, str(val.tolist()) if isinstance(val, np.ndarray) else val)
+            for k, val in v.items() if k not in inert
+        )
+        if effective in seen_effective:
+            continue
+        seen_effective.add(effective)
+
+        iter_cfg = {**cfg, **v}
+        curve_label = ", ".join(["PPO"] + _build_legend_parts(legend, iter_cfg))
+
+        hyperparams = {
+            "n_repetitions": n_repetitions,
+            "n_timesteps": n_timesteps,
+            "eval_interval": eval_interval,
+            "max_episode_length": max_episode_length,
+            "actor_lr": v["actor_lr"],
+            "critic_lr": v["critic_lr"],
+            "gamma": v["gamma"],
+            "actor_hidden_nn": str(v["actor_hidden_nn"].tolist()),
+            "critic_hidden_nn": str(v["critic_hidden_nn"].tolist()),
+            "gae_lambda": v["gae_lambda"],
+            "clip_epsilon": v["clip_epsilon"],
+            "n_epochs": v["n_epochs"],
+            "entropy_coef": v["entropy_coef"],
+            "value_coef": v["value_coef"],
+            "rollout_steps": v["rollout_steps"],
+            "FULL_EPISODE_UPDATES": v["FULL_EPISODE_UPDATES"],
+        }
+        # Only non-legacy values of the new knobs join the disk-matching key.
+        hyperparams.update({
+            key: v[key] for key, legacy in _PPO_LEGACY_DEFAULTS.items()
+            if v[key] != legacy
+        })
+
+        setting_jobs.append({
+            "curve_label": curve_label,
+            "method": "ppo",
+            "kwargs": dict(
+                method="ppo",
+                n_repetitions=n_repetitions,
+                n_timesteps=n_timesteps,
+                eval_interval=eval_interval,
+                max_episode_length=max_episode_length,
+                actor_lr=v["actor_lr"],
+                critic_lr=v["critic_lr"],
+                gamma=v["gamma"],
+                actor_hidden_nn=v["actor_hidden_nn"],
+                critic_hidden_nn=v["critic_hidden_nn"],
+                gae_lambda=v["gae_lambda"],
+                clip_epsilon=v["clip_epsilon"],
+                n_epochs=v["n_epochs"],
+                entropy_coef=v["entropy_coef"],
+                value_coef=v["value_coef"],
+                full_episode_updates=v["FULL_EPISODE_UPDATES"],
+                rollout_steps=v["rollout_steps"],
+                observation_mode=v["observation_mode"],
+                actor_arch=v["actor_arch"],
+                advantage_mode=v["advantage_mode"],
+                group_size=v["group_size"],
+                eval_n_starts=v["eval_n_starts"],
+                pointer_embed=v["pointer_embed"],
+                pointer_n_heads=v["pointer_n_heads"],
+                pointer_n_layers=v["pointer_n_layers"],
+                pointer_ff_hidden=v["pointer_ff_hidden"],
+                base_seed=base_seed,
+                plot_smoothing_window=1,
+            ),
+            "hyperparams": hyperparams,
+        })
+
+    if skipped_pointer_legacy:
+        print(
+            f"[PPO] Skipped {skipped_pointer_legacy} setting(s) combining "
+            "actor_arch='pointer' with observation_mode='legacy': the pointer "
+            "actor needs the enriched observation's per-city features."
+        )
     return setting_jobs
 
 
